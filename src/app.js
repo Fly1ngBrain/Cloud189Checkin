@@ -47,8 +47,8 @@ const run = async (userName, password, userSizeInfoMap, logger) => {
       }
       if (e.code === "ECONNRESET" || e.code === "ETIMEDOUT") {
         logger.error("请求超时");
-        throw e;
       }
+      throw e; // 总是抛出错误，让调用者知道任务失败
     } finally {
       logger.log(
         `执行完毕, 耗时 ${((Date.now() - before) / 1000).toFixed(2)} 秒`
@@ -61,13 +61,20 @@ const run = async (userName, password, userSizeInfoMap, logger) => {
 async function main() {
   //  用于统计实际容量变化
   const userSizeInfoMap = new Map();
+  let hasError = false; // 标记是否有任务失败
+  
   for (let index = 0; index < accounts.length; index++) {
     const account = accounts[index];
     const { userName, password } = account;
     const userNameInfo = mask(userName, 3, 7);
     const logger = log4js.getLogger(userName);
     logger.addContext("user", userNameInfo);
-    await run(userName, password, userSizeInfoMap, logger);
+    try {
+      await run(userName, password, userSizeInfoMap, logger);
+    } catch (e) {
+      hasError = true; // 标记有错误发生
+      logger.error(`账户 ${userNameInfo} 执行失败:`, e.message);
+    }
   }
 
   //数据汇总
@@ -75,44 +82,59 @@ async function main() {
     userName,
     { cloudClient, userSizeInfo, logger },
   ] of userSizeInfoMap) {
-    const afterUserSizeInfo = await cloudClient.getUserSizeInfo();
-    logger.log(
-      `个人容量：⬆️  ${(
-        (afterUserSizeInfo.cloudCapacityInfo.totalSize -
-          userSizeInfo.cloudCapacityInfo.totalSize) /
-        1024 /
-        1024
-      ).toFixed(2)}M/${(
-        afterUserSizeInfo.cloudCapacityInfo.totalSize /
-        1024 /
-        1024 /
-        1024
-      ).toFixed(2)}G`,
-      `家庭容量：⬆️  ${(
-        (afterUserSizeInfo.familyCapacityInfo.totalSize -
-          userSizeInfo.familyCapacityInfo.totalSize) /
-        1024 /
-        1024
-      ).toFixed(2)}M/${(
-        afterUserSizeInfo.familyCapacityInfo.totalSize /
-        1024 /
-        1024 /
-        1024
-      ).toFixed(2)}G`
-    );
+    try {
+      const afterUserSizeInfo = await cloudClient.getUserSizeInfo();
+      logger.log(
+        `个人容量：⬆️  ${(
+          (afterUserSizeInfo.cloudCapacityInfo.totalSize -
+            userSizeInfo.cloudCapacityInfo.totalSize) /
+          1024 /
+          1024
+        ).toFixed(2)}M/${(
+          afterUserSizeInfo.cloudCapacityInfo.totalSize /
+          1024 /
+          1024 /
+          1024
+        ).toFixed(2)}G`,
+        `家庭容量：⬆️  ${(
+          (afterUserSizeInfo.familyCapacityInfo.totalSize -
+            userSizeInfo.familyCapacityInfo.totalSize) /
+          1024 /
+          1024
+        ).toFixed(2)}M/${(
+          afterUserSizeInfo.familyCapacityInfo.totalSize /
+          1024 /
+          1024 /
+          1024
+        ).toFixed(2)}G`
+      );
+    } catch (e) {
+      hasError = true;
+      logger.error(`获取 ${userName} 容量信息失败:`, e.message);
+    }
   }
+  
+  return hasError;
 }
 
 (async () => {
+  let hasError = false;
   try {
-    await main();
+    hasError = await main();
     //等待日志文件写入
     await delay(1000);
   } finally {
     const logs = catLogs();
     const events = recording.replay();
     const content = events.map((e) => `${e.data.join("")}`).join("  \n");
-    push("天翼云盘自动签到任务", logs + content);
+    
+    // 只在有错误时推送通知
+    if (hasError) {
+      push("天翼云盘自动签到任务失败", logs + content);
+    } else {
+      console.log("所有任务执行成功，不发送通知");
+    }
+    
     recording.erase();
     cleanLogs();
   }
